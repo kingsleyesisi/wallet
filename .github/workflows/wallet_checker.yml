@@ -25,7 +25,7 @@ jobs:
         pip install web3 mnemonic bip-utils requests
         
     - name: Create input phrase file
-      run: echo "${{ secrets.INPUT_PHRASE }}" > input_phrase.txt
+      run: echo "radar flee soul boil often coffee sweet broccoli push runaway title cube" > input_phrase.txt
         
     - name: Run wallet checker
       run: python wallet.py
