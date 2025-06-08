@@ -1,101 +1,223 @@
+import os
+import time
 import logging
 import requests
 from web3 import Web3
 from mnemonic import Mnemonic
 from bip_utils import Bip44, Bip44Coins, Bip44Changes
-import time
-def runtime_checker(func):
-	"""
-	A decorator to measure the runtime of a function.
-	"""
-	def wrapper(*args, **kwargs):
-		start_time = time.time()
-		result = func(*args, **kwargs)
-		end_time = time.time()
-		runtime = end_time - start_time
-		logging.info(f"Function '{func.__name__}' executed in {runtime:.4f} seconds")
-		print(f"Function '{func.__name__}' executed in {runtime:.4f} seconds")
-		return result
-	return wrapper
-# Configure logging
-t = "%(asctime)s - %(levelname)s - %(message)s"
-logging.basicConfig(level=logging.INFO, format=t)
+from utils import permutation_generator
 
 # === Configuration ===
-# Hardcoded 12- or 24-word mnemonic phrase
-MNEMONIC = "review field card rice rotate beauty bitter occur engine organ toast either"
-# Ethereum node RPC URL (e.g., Infura endpoint)
-RPC_URL = "https://mainnet.infura.io/v3/8d6d51e263974250994d2359a5119a96"
-# Derivation path details: account 0, external chain, address index 0
+INPUT_PHRASE_FILE = "input_phrase.txt"
+PERMUTATIONS_FILE = "permutations.txt"
+STATE_FILE = "state.txt"
+RESULTS_FILE = "results.txt"
+# Map network names to RPC URLs and CoinGecko IDs and Bip44Coins
+NETWORKS = [
+    {
+        "name": "Ethereum",
+        "rpc": "https://mainnet.infura.io/v3/8d6d51e263974250994d2359a5119a96",
+        "coingecko_id": "ethereum",
+        "coin_enum": Bip44Coins.ETHEREUM,
+        "symbol": "ETH"
+    },
+    {
+        "name": "Binance Smart Chain",
+        "rpc": "https://bsc-dataseed.binance.org/",
+        "coingecko_id": "binancecoin",
+        "coin_enum": Bip44Coins.BINANCE_SMART_CHAIN,
+        "symbol": "BNB"
+    },
+    {
+        "name": "Polygon",
+        "rpc": "https://polygon-rpc.com/",
+        "coingecko_id": "matic-network",
+        "coin_enum": Bip44Coins.POLYGON,
+        "symbol": "MATIC"
+    }
+]
+CHECK_INTERVAL = 10  # seconds between balance checks
+LOG_FORMAT = "%(asctime)s - %(levelname)s - %(message)s"
+logging.basicConfig(level=logging.DEBUG, format=LOG_FORMAT)
+
+# Price cache to reduce CoinGecko API calls
+PRICE_CACHE = {}
+CACHE_DURATION = 300  # 5 minutes in seconds
+
+def load_state() -> int:
+    """Load last processed permutation index."""
+    if os.path.exists(STATE_FILE):
+        try:
+            idx = int(open(STATE_FILE).read().strip())
+            return idx
+        except ValueError as e:
+            logging.error(f"Error reading state file: {e}")
+            return 0
+    logging.debug("No state file found, starting from 0.")
+    return 0
 
 
-def get_eth_price_usd() -> float:
-    """
-    Fetches the current Ethereum price in USD using CoinGecko's public API.
-    """
-    url = "https://api.coingecko.com/api/v3/simple/price"
-    params = {"ids": "ethereum", "vs_currencies": "usd"}
-    response = requests.get(url, params=params)
-    response.raise_for_status()
-    data = response.json()
-    return data["ethereum"]["usd"]
+def save_state(index: int):
+    """Save last processed index to state file."""
+    with open(STATE_FILE, "w") as f:
+        f.write(str(index))
+    logging.debug(f"Saved state index: {index}")
 
 
-def derive_eth_address(mnemonic: str) -> str:
-    """
-    Derives an Ethereum address from the given mnemonic using BIP44.
-    """
-    # Generate seed from mnemonic
-    mnemo = Mnemonic("english")
-    seed_bytes = mnemo.to_seed(mnemonic)
+def derive_address(mnemonic: str, coin: Bip44Coins) -> str:
+    """Derive address using BIP44 path m/44'/60'/0'/0/0"""
+    # logging.debug(f"Deriving  for coin: {coin}")
+    seed = Mnemonic("english").to_seed(mnemonic)
+    ctx = Bip44.FromSeed(seed, coin)
+    acct = ctx.Purpose().Coin().Account(0).Change(Bip44Changes.CHAIN_EXT).AddressIndex(0)
+    address = acct.PublicKey().ToAddress()
+    logging.debug(f"Derived address: {address}")
+    return address
 
-    # Derive BIP44 Ethereum account: m/44'/60'/0'/0/0
-    bip44_def_ctx = Bip44.FromSeed(seed_bytes, Bip44Coins.ETHEREUM)
-    bip44_acc = (
-        bip44_def_ctx
-        .Purpose()
-        .Coin()
-        .Account(0)
-        .Change(Bip44Changes.CHAIN_EXT)
-        .AddressIndex(0)
-    )
 
-    return bip44_acc.PublicKey().ToAddress()
+def get_price_usd(coingecko_id: str) -> float:
+    """Fetch token price in USD from CoinGecko with caching."""
+    current_time = time.time()
+    
+    # Return cached price if valid
+    if coingecko_id in PRICE_CACHE:
+        price, timestamp = PRICE_CACHE[coingecko_id]
+        if current_time - timestamp < CACHE_DURATION:
+            # logging.debug(f"Using cached price for {coingecko_id}: {price}")
+            return price
+    
+    # logging.debug(f"Fetching fresh price for: {coingecko_id}")
+    try:
+        url = "https://api.coingecko.com/api/v3/simple/price"
+        params = {"ids": coingecko_id, "vs_currencies": "usd"}
+        headers = {'User-Agent': 'WalletChecker/1.0'}
+        r = requests.get(url, params=params, headers=headers, timeout=10)
+        r.raise_for_status()
+        price = r.json()[coingecko_id]["usd"]
+        PRICE_CACHE[coingecko_id] = (price, current_time)
+        # logging.debug(f"Fetched new price: {price}")
+        return price
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 429:
+            logging.warning("CoinGecko rate limit reached. Using cached value.")
+            # Try to return last cached value if available
+            if coingecko_id in PRICE_CACHE:
+                return PRICE_CACHE[coingecko_id][0]
+        logging.error(f"HTTP error fetching price: {e}")
+    except Exception as e:
+        logging.error(f"Error fetching price: {e}")
+    
+    # Fallback to 0 if no cached value
+    if coingecko_id in PRICE_CACHE:
+        return PRICE_CACHE[coingecko_id][0]
+    return 0.0
 
-@runtime_checker
+
 def main():
-    # Derive Ethereum address
-    address = derive_eth_address(MNEMONIC)
+    logging.info("Starting wallet checker...")
+    # Load input phrase
+    with open(INPUT_PHRASE_FILE, "r") as f:
+        phrase = f.read().strip()
+    logging.debug(f"Loaded input phrase: {phrase}")
 
-    # Connect to Ethereum network
-    w3 = Web3(Web3.HTTPProvider(RPC_URL))
-    if not w3.is_connected():
-        logging.error("Failed to connect to Ethereum node at %s", RPC_URL)
-        return
+    state_index = load_state()
+    gen = permutation_generator(phrase)
+    perm_file = open(PERMUTATIONS_FILE, "a")
+    results_file = open(RESULTS_FILE, "a")
 
-    # Retrieve ETH balance for the address
-    balance_wei = w3.eth.get_balance(address)
-    balance_eth = w3.from_wei(balance_wei, 'ether')
-    print(f"Balance in Ether (full precision): {balance_eth} ETH")
+    # Pre-fetch prices for all networks
+    network_prices = {}
+    for net in NETWORKS:
+        network_prices[net["name"]] = get_price_usd(net["coingecko_id"])
+        time.sleep(1)  # Space out initial price fetches
 
-    # Fetch current ETH price in USD
-    eth_price_usd = get_eth_price_usd()
-    total_usd_value = float(balance_eth) * eth_price_usd
+    price_refresh_counter = 0
 
-    # Output details
-    print(f"Wallet Address: {address}")
-    print(f"ETH Balance: {balance_eth:.6f} ETH")
-    print(f"Approx. Value: ${total_usd_value:.2f} USD")
+    for idx, perm_str in enumerate(gen):
+        # logging.debug(f"Processing permutation idx {idx}")
+        if idx < state_index:
+            logging.debug(f"Skipping idx {idx}, already processed.")
+            continue
+            
+        # Log permutation
+        logging.info(f"Checking phrase idx {idx}: {perm_str}")
+        perm_file.write(perm_str + "\n")
+        perm_file.flush()
 
-    # Log if balance exceeds $1
-    if total_usd_value > 1:
-        logging.info(f"Balance exceeds $1 USD: ${total_usd_value:.2f}")
-    else:
-        logging.info(f"Balance does not exceed $1 USD: ${total_usd_value:.2f}")
+        # Track if we found any wallet with >$1
+        valuable_wallet_found = False
+        valuable_output = ""
+        
+        # Check balances across networks
+        for i, net in enumerate(NETWORKS):
+            logging.debug(f"Network: {net['name']}, RPC: {net['rpc']}")
+            try:
+                # Derive address
+                addr = derive_address(perm_str, net["coin_enum"])
+                
+                # Connect to network
+                w3 = Web3(Web3.HTTPProvider(net["rpc"]))
+                if not w3.is_connected():
+                    logging.error(f"Failed to connect to {net['name']} RPC at {net['rpc']}")
+                    continue
+                logging.debug(f"Connected to {net['name']} RPC")
 
+                # Get balance
+                balance_wei = w3.eth.get_balance(addr)
+                balance = w3.from_wei(balance_wei, 'ether')
+                price = network_prices[net["name"]]
+                usd_val = float(balance) * price
+
+                # Format output
+                out = (f"[{net['name']}] Phrase idx {idx} | Address: {addr} | "
+                       f"Balance: {balance:.6f} {net['symbol']} (~${usd_val:.2f})")
+                print(out)
+                logging.info(out)
+                results_file.write(out + "\n")
+                
+                # Check if balance exceeds $1 threshold
+                if usd_val >= 1.0:
+                    valuable_wallet_found = True
+                    valuable_output += f"\n{out}"
+                    
+            except Exception as e:
+                err = f"Error on {net['name']} for phrase idx {idx}: {e}"
+                logging.error(err)
+                results_file.write(err + "\n")
+            
+            # Add delay between network checks (except last one)
+            if i < len(NETWORKS) - 1:
+                time.sleep(3)  # Space out RPC requests
+        
+        # Save valuable wallet info with phrase
+        if valuable_wallet_found:
+            valuable_output = (f"\n\n=== VALUABLE WALLET FOUND ===\n"
+                               f"Phrase idx {idx}: {perm_str}\n"
+                               f"Networks:{valuable_output}\n"
+                               f"==============================\n")
+            print(valuable_output)
+            logging.warning(valuable_output)
+            results_file.write(valuable_output)
+            results_file.flush()
+        
+        # Periodically refresh prices
+        price_refresh_counter += 1
+        if price_refresh_counter >= 30:  # Every 30 permutations (~5 minutes)
+            logging.info("Refreshing token prices...")
+            for net in NETWORKS:
+                network_prices[net["name"]] = get_price_usd(net["coingecko_id"])
+                time.sleep(1)  # Space out price refreshes
+            price_refresh_counter = 0
+        
+        save_state(idx + 1)
+        time.sleep(CHECK_INTERVAL)
+
+    perm_file.close()
+    results_file.close()
+    logging.info("Completed all permutations.")
 
 if __name__ == "__main__":
-    main()
-
-# Dependencies:
-# pip install web3 requests mnemonic bip_utils
+    try:
+        main()
+    except KeyboardInterrupt:
+        logging.warning("Interrupted by user; state saved.")
