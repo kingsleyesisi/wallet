@@ -3,39 +3,42 @@ name: Wallet Checker Cron
 on:
   schedule:
     - cron: '0 */5 * * *'  # Every 5 hours
-  workflow_dispatch:  # Allow manual runs
+  workflow_dispatch:      # Allow manual runs
 
 jobs:
   run-checker:
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      with:
-        persist-credentials: false  # Required for push later
-    
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.10'
-    
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install web3 mnemonic bip-utils requests
-        
-    - name: Create input phrase file
-      run: echo "radar flee soul boil often coffee sweet broccoli push runaway title cube" > input_phrase.txt
-        
-    - name: Run wallet checker
-      run: python wallet.py
-      
-    - name: Commit and push results
-      run: |
-        git config --global user.name 'kingsleyesisi'
-        git config --global user.email 'kingsleyesisi@outlook.com'
-        git add .
-        git commit -am "Auto-update wallet checker results"
-        git push
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false  # Required for push later
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install web3 mnemonic bip-utils requests
+
+      - name: Create input phrase file
+        run: |
+          echo "awkward educate hill exact when obscure ask capable tank uncover sand morning place milk struggle civil melody hold wall glimpse baby thought evolve rigid" > input_phrase.txt
+
+      - name: Run wallet checker
+        run: python wallet.py
+
+      - name: Commit and push results
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global user.name 'kingsleyesisi'
+          git config --global user.email 'kingsleyesisi@outlook.com'
+          git add .
+          git commit -am "Auto-update wallet checker results" || echo "No changes to commit"
+          # Authenticate using the GITHUB_TOKEN
+          git remote set-url origin https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git
+          git push origin HEAD:main
