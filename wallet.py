@@ -115,6 +115,7 @@ def get_price_usd(coingecko_id: str) -> float:
 
 def main():
     logging.info("Starting wallet checker...")
+    start_time = time.time()  # Add this line
     # Load input phrase
     with open(INPUT_PHRASE_FILE, "r") as f:
         phrase = f.read().strip()
@@ -135,6 +136,10 @@ def main():
 
     for idx, perm_str in enumerate(gen):
         # logging.debug(f"Processing permutation idx {idx}")
+        if time.time() - start_time > 5 * 60 * 60:  # 5 hours in seconds
+            logging.info("Reached 5 hour limit. Stopping execution.")
+            break
+        
         if idx < state_index:
             logging.debug(f"Skipping idx {idx}, already processed.")
             continue
@@ -150,7 +155,7 @@ def main():
         
         # Check balances across networks
         for i, net in enumerate(NETWORKS):
-            logging.debug(f"Network: {net['name']}, RPC: {net['rpc']}")
+            # logging.debug(f"Network: {net['name']}, RPC: {net['rpc']}")
             try:
                 # Derive address
                 addr = derive_address(perm_str, net["coin_enum"])
@@ -167,7 +172,7 @@ def main():
                 balance = w3.from_wei(balance_wei, 'ether')
                 price = network_prices[net["name"]]
                 usd_val = float(balance) * price
-
+                
                 # Format output
                 out = (f"[{net['name']}] Phrase idx {idx} | Address: {addr} | "
                        f"Balance: {balance:.6f} {net['symbol']} (~${usd_val:.2f})")
@@ -177,8 +182,13 @@ def main():
                 
                 # Check if balance exceeds $1 threshold
                 if usd_val >= 1.0:
+                    print("success")
+                    logging.info("success")
                     valuable_wallet_found = True
                     valuable_output += f"\n{out}"
+                else:
+                    print("empty")
+                    logging.info("empty")
                     
             except Exception as e:
                 err = f"Error on {net['name']} for phrase idx {idx}: {e}"
