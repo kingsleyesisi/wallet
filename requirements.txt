@@ -1,0 +1,6 @@
+Flask
+gunicorn
+web3
+mnemonic
+bip_utils
+requests
