@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.env
+found.txt
+results.txt
+state.txt
+permutations.txt
